@@ -81,16 +81,12 @@ for idx = 2:numel(tVec)
     [vRef,wRef,lookAheadPt] = controller(curPose);
     targetDir = atan2(lookAheadPt(2)-curPose(2),lookAheadPt(1)-curPose(1)) - curPose(3);
     steerDir = vfh(ranges, lidar.scanAngles, targetDir); 
-    display(steerDir);
-    if ~isnan(steerDir) && abs(steerDir-targetDir) > 0.1
-        wRef = 0.5*steerDir;
-    end
-    
+
     % Control the robot
     velB = [vRef;0;wRef];                   % Body velocities [vx;vy;w]
     vel = bodyToWorld(velB,curPose);  % Convert from body to world
     
-    % Perform forward discrete integration step
+    % Perform forward discrete integration ste
     pose(:,idx) = curPose + vel*sampleTime; 
     
     % Update visualization
