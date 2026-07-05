@@ -23,12 +23,12 @@ setup(slamObj);
 
 % Define Vehicle
 R = 0.1;                        % Wheel radius [m]
-L = 0.5;                        % Wheelbase [m]
+L = 0.2;                        % Wheelbase [m]
 dd = DifferentialDrive(R,L);
 
 % Sample time and time array
 sampleTime = 0.1;              % Sample time [s]
-tVec = 0:sampleTime:30;        % Time array
+tVec = 0:sampleTime:45;        % Time array
 
 % Initial conditions
 initPose = [1;1;0];            % Initial pose (x y theta)
@@ -52,21 +52,22 @@ attachLidarSensor(viz, lidar);
 
 % Vector Field Histogram (VFH) for obstacle avoidance
 vfh = controllerVFH;
-vfh.DistanceLimits = [0.1 1.5];
-vfh.NumAngularSectors = 60;
-vfh.HistogramThresholds = [1 2];
-vfh.RobotRadius = L;
+vfh.DistanceLimits = [0.05 1.5];
+vfh.NumAngularSectors = 180;
+vfh.HistogramThresholds = [4 5];
+vfh.RobotRadius = 0.1;
 vfh.SafetyDistance = 0.01;
 vfh.MinTurningRadius = 0.05;
 
 % Create waypoints
-waypoints = [initPose(1:2)'; 2.5 1; 1 4; initPose(1:2)'];
+waypoints = [initPose(1:2)'; 2.5 1; 1 4; 2.8 4.5; 2.5 1; initPose(1:2)'];
 
 % Pure Pursuit Controller
+maxVelocity = 0.25;
 controller = controllerPurePursuit;
 controller.Waypoints = waypoints;
 controller.LookaheadDistance = 0.5;
-controller.DesiredLinearVelocity = 0.2;
+controller.DesiredLinearVelocity = maxVelocity;
 controller.MaxAngularVelocity = 1.5;
 
 r = rateControl(1/sampleTime);
@@ -82,6 +83,9 @@ for idx = 2:numel(tVec)
     targetDir = atan2(lookAheadPt(2)-curPose(2),lookAheadPt(1)-curPose(1)) - curPose(3);
     steerDir = vfh(ranges, lidar.scanAngles, targetDir); 
 
+    if ~isnan(steerDir) && abs(steerDir-targetDir) > 0.1
+        wRef = 0.2*steerDir;
+    end
     % Control the robot
     velB = [vRef;0;wRef];                   % Body velocities [vx;vy;w]
     vel = bodyToWorld(velB,curPose);  % Convert from body to world
