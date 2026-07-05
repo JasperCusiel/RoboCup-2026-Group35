@@ -48,22 +48,23 @@ lidar.maxRange = 4;
 viz = Visualizer2D;
 viz.mapName = 'mapTruth';
 viz.hasWaypoints = true;
+viz.robotRadius = 0.1;
 attachLidarSensor(viz, lidar);
 
 % Vector Field Histogram (VFH) for obstacle avoidance
 vfh = controllerVFH;
 vfh.DistanceLimits = [0.05 1.5];
 vfh.NumAngularSectors = 180;
-vfh.HistogramThresholds = [4 5];
+vfh.HistogramThresholds = [6 8];
 vfh.RobotRadius = 0.1;
-vfh.SafetyDistance = 0.01;
+vfh.SafetyDistance = 0.05;
 vfh.MinTurningRadius = 0.05;
 
 % Create waypoints
 waypoints = [initPose(1:2)'; 2.5 1; 1 4; 2.8 4.5; 2.5 1; initPose(1:2)'];
 
 % Pure Pursuit Controller
-maxVelocity = 0.25;
+maxVelocity = 0.4;
 controller = controllerPurePursuit;
 controller.Waypoints = waypoints;
 controller.LookaheadDistance = 0.5;
@@ -71,6 +72,9 @@ controller.DesiredLinearVelocity = maxVelocity;
 controller.MaxAngularVelocity = 1.5;
 
 r = rateControl(1/sampleTime);
+
+% speed PD
+prevError = 0;
 
 for idx = 2:numel(tVec) 
     
@@ -86,6 +90,26 @@ for idx = 2:numel(tVec)
     if ~isnan(steerDir) && abs(steerDir-targetDir) > 0.1
         wRef = 0.2*steerDir;
     end
+
+    % speed PD
+    dt = sampleTime;
+    
+    err = abs(angdiff(targetDir, steerDir));
+    
+    dErr = (err - prevError) / dt;
+    
+    Kp = 0.4;
+    Kd = 0.1;
+    
+    speedScale = 1 - (Kp * err + Kd * dErr);
+    
+    speedScale = min(max(speedScale, 0.1), 1.0);
+    
+    prevError = err;
+    controller.DesiredLinearVelocity = maxVelocity * speedScale;
+
+
+
     % Control the robot
     velB = [vRef;0;wRef];                   % Body velocities [vx;vy;w]
     vel = bodyToWorld(velB,curPose);  % Convert from body to world
