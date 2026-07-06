@@ -91,7 +91,8 @@ classdef slam < matlab.System
                    obj.CachedHasFrontier = hasFrontierNow;
                    if hasFrontierNow
                        obj.CachedGoalXY = goalXYNow;
-                       rawPath = obj.planPathToGoal(obj.Map, deadReckoningPose(1:2), goalXYNow);
+                       % rawPath = obj.planPathToGoal(obj.Map, deadReckoningPose(1:2), goalXYNow);
+                       rawPath = 0;
                        n = min(size(rawPath, 1), obj.maxPathLength);
                        obj.CachedPath = zeros(obj.maxPathLength, 2);
                        obj.CachedPath(1:n, :) = rawPath(1:n, :);
