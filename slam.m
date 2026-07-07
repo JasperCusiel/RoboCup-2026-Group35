@@ -5,12 +5,9 @@ classdef slam < matlab.System
     % to define a System object.
 
     % Public, tunable properties
-    properties
+    properties (Nontunable)
         maxRange = 5;  % meters
         resolution = 10;  % cells per meter
-        loopClosureThreshold = 360;
-        loopClosureSearchRadius = 8;
-        rebuildEveryN = 10; % rebuild occupancy grid ever N scans
         arenaWidth = 3;
         arenaHeight = 5;
         maxNumScans = 500;
@@ -18,19 +15,22 @@ classdef slam < matlab.System
         maxFrontierCells = 1000;
         maxClusters = 50;
         minClusterSize = 5;
+        
+        % Occupancy classification thresholds
+        occupiedThreshold = 0.6;
+        freeThreshold = 0.35
     end
 
     % Pre-computed constants or internal states
     properties (Access = private)
-        SlamObj             % the underlying lidarSLAM object
-        Correction          % [x y theta]: dead-reckoning frame -> world frame
-        PrevDeadReconingPose          % dead-reckoning pose at the previous accepted scan
         Map             % fixed size to the arena
-        ScansSinceRebuild
         CachedGoalXY
         CachedPath
         CachedPathLength
         CachedHasFrontier
+        LastPlannedGoalXY
+        Planner
+
         
     end
 
@@ -38,80 +38,71 @@ classdef slam < matlab.System
         function setupImpl(obj)
             %#codegen
             % Perform one-time calculations, such as computing constants
-            obj.SlamObj = lidarSLAM(obj.resolution,obj.maxRange, obj.maxNumScans);
-            obj.SlamObj.LoopClosureThreshold = obj.loopClosureThreshold;
-            obj.SlamObj.LoopClosureSearchRadius = obj.loopClosureSearchRadius;
-
+   
             obj.Map = occupancyMap(obj.arenaWidth, obj.arenaHeight, obj.resolution);
+            obj.Map.OccupiedThreshold = obj.occupiedThreshold;
+            obj.Map.FreeThreshold = obj.freeThreshold;
 
-
-            obj.Correction        = [0 0 0];
-            obj.PrevDeadReconingPose        = [0 0 0];
-            obj.ScansSinceRebuild = 0;
             obj.CachedGoalXY      = [0 0];
             obj.CachedPath        = zeros(obj.maxPathLength, 2);
             obj.CachedPathLength  = 0;
             obj.CachedHasFrontier = false;
 
+            obj.Planner = plannerAStarGrid(obj.Map);
+   
+            
+
         end
 
-        function [map, goalXY, path, pathLength, hasFrontier, mapUpdated, frontierXY] = stepImpl(obj,ranges, angles, deadReckoningPose)
-           %#codegen
+        function [map, goalXY, path, pathLength, hasFrontier, frontierXY] = ...
+        stepImpl(obj, ranges, angles, deadReckoningPose)
+            %#codegen
             scan = lidarScan(ranges, angles);
-           % range, angles -> new lidar scan
-           % deadReckoningPose -> from IMU + optical flow measurements
-           deadReckoningPose = reshape(deadReckoningPose, 1, 3);
+            deadReckoningPose = reshape(deadReckoningPose, 1, 3);
 
-           relativePoseEstimate = composeSE2(obj, invertSE2(obj, obj.PrevDeadReconingPose), deadReckoningPose);
-           obj.PrevDeadReconingPose = deadReckoningPose;
+            insertRay(obj.Map, deadReckoningPose, scan, obj.maxRange);
 
-           [isAccepted, ~, optInfo] = addScan(obj.SlamObj, scan, relativePoseEstimate);
+            [goalXYNow, hasFrontierNow, frontierXY] = obj.pickFrontierGoal(obj.Map, deadReckoningPose(1:2));
 
-           mapUpdated = false;
-           frontierXY = [0 0];
-           % correctedPoseNow = composeSE2(obj, obj.Correction, deadReckoningPose);
+            obj.CachedHasFrontier = hasFrontierNow;
 
+            if hasFrontierNow
+                obj.CachedGoalXY = goalXYNow;
+            end
 
-           if isAccepted
-               [~, poses] = scansAndPoses(obj.SlamObj);
-               slamPoseNow = poses(end, :);
+            needsPlan = hasFrontierNow && (obj.CachedPathLength == 0 || ~isequal(obj.CachedGoalXY, obj.LastPlannedGoalXY));
+            if needsPlan
+                startXY = deadReckoningPose(1:2);
+                rawPath = plan(obj.Planner, startXY, obj.CachedGoalXY, 'world');
+ 
+                n = size(rawPath, 1);
+                nClamped = min(n, obj.maxPathLength);
 
-               obj.Correction = composeSE2(obj, slamPoseNow, invertSE2(obj, deadReckoningPose));
+                decimatedPath = zeros(10, 2);
+                decimatedLength = 0;
 
-               insertRay(obj.Map, deadReckoningPose, scan, obj.maxRange);
+                for i = 1:4:nClamped
+                    decimatedLength = decimatedLength + 1;
+                    decimatedPath(decimatedLength, :) = rawPath(i, :);
+                end
 
-               obj.ScansSinceRebuild = obj.ScansSinceRebuild + 1;
-               mapUpdated = optInfo.IsPerformed || obj.ScansSinceRebuild >= obj.rebuildEveryN;
-           end
-
-           if mapUpdated
-                   obj.ScansSinceRebuild = 0; % Reset the rebuild counter
-                   [goalXYNow, hasFrontierNow, frontierXY] = obj.pickFrontierGoal(obj.Map, deadReckoningPose(1:2));
-                   
-                   obj.CachedHasFrontier = hasFrontierNow;
-                   if hasFrontierNow
-                       obj.CachedGoalXY = goalXYNow;
-                       % rawPath = obj.planPathToGoal(obj.Map, deadReckoningPose(1:2), goalXYNow);
-                       rawPath = 0;
-                       n = min(size(rawPath, 1), obj.maxPathLength);
-                       obj.CachedPath = zeros(obj.maxPathLength, 2);
-                       obj.CachedPath(1:n, :) = rawPath(1:n, :);
-                       obj.CachedPathLength = n;
-                   else
-                       obj.CachedPathLength = 0;
-                   end
-
-           end
-
-           % correctedPose = correctedPoseNow;
-           map       = obj.Map; 
-           goalXY        = obj.CachedGoalXY;
-           path          = obj.CachedPath;
-           pathLength    = obj.CachedPathLength;
-           hasFrontier   = obj.CachedHasFrontier;
-
-           
-
+                 if any(decimatedPath(decimatedLength, :) ~= rawPath(nClamped, :))
+                        decimatedLength = decimatedLength + 1;
+                        decimatedPath(decimatedLength, :) = rawPath(nClamped, :);
+                 end
+                obj.CachedPath = decimatedPath;
+                obj.CachedPathLength = decimatedLength;
+                % obj.CachedPath = zeros(obj.maxPathLength, 2);
+                % obj.CachedPath(1:nClamped, :) = rawPath(1:nClamped, :);
+                % obj.CachedPathLength = nClamped;
+                obj.LastPlannedGoalXY = obj.CachedGoalXY;
+            end
+        
+            map         = obj.Map; 
+            goalXY      = obj.CachedGoalXY;
+            path        = obj.CachedPath;
+            pathLength  = obj.CachedPathLength;
+            hasFrontier = obj.CachedHasFrontier;
         end
 
         function resetImpl(obj)
@@ -121,29 +112,9 @@ classdef slam < matlab.System
         end
     end
 
-    methods 
-        function pose = getCorrectedPose(obj, deadReckoningPoseNow)
-            %#codegen
-            pose = composeSE2(obj, obj.Correction, deadReckoningPoseNow);
-        end
-    end
 
     methods (Access = private)
-
-        function p = composeSE2(~, poseA, poseB)
-            %#codegen
-            c = cos(poseA(3));
-            s = sin(poseA(3));
-            p = [poseA(1) + c*poseB(1) - s*poseB(2), poseA(2) + s*poseB(1) + c*poseB(2), wrapToPiLocal(-poseA(3))];
-        end
-
-        function p = invertSE2(~, poseA)
-            %#codegen
-            c = cos(poseA(3));
-            s = sin(poseA(3));
-            p = [-c*poseA(1) - s*poseA(2), s*poseA(1) - c*poseA(2), wrapToPiLocal(-poseA(3))];
-        end
-
+     
         function [goalXY, hasFrontier, frontierXY] = pickFrontierGoal(obj, map, robotPose)
             %#codegen
             frontierXY = [0 0];
@@ -151,7 +122,7 @@ classdef slam < matlab.System
             occTern = occupancyMatrix(map, 'ternary');
             fMask = obj.frontierMask(occTern);
             
-            [centroidsRC, sizes, numClusters] = obj.clusterFrontierCells(fMask);
+            [centroidsRC, sizes, numClusters] = obj.clusterFrontierCells(fMask, obj.maxClusters);
             
             goalXY = zeros(1,2);
             hasFrontier = false;
@@ -168,7 +139,8 @@ classdef slam < matlab.System
             nValid = 0;
             
             for i = 1:numClusters
-                if sizes(i) >= obj.minClusterSize
+                % check bounds.
+                if sizes(i) >= obj.minClusterSize && nValid < obj.maxClusters
                     nValid = nValid + 1;
                     centroidsValid(nValid,:) = centroidsRC(i,:);
                     sizesValid(nValid) = sizes(i);
@@ -198,6 +170,8 @@ classdef slam < matlab.System
     end
     
     methods (Access = private, Static)
+  
+
         function fMask = frontierMask(occTern)
             %#codegen
             [rows, cols] = size(occTern);
@@ -232,17 +206,16 @@ classdef slam < matlab.System
             fMask = free & unkDilated;
         end
              
-        function [centroidsRC, sizes, numClusters] = clusterFrontierCells(mask)
+        function [centroidsRC, sizes, numClusters] = clusterFrontierCells(mask, maxClusters)
             %#codegen
             [rows, cols] = size(mask);
             
             visited = false(rows, cols);
             
             MAX_CELLS = rows * cols;
-            MAX_CLUSTERS = 1000;
             
-            centroidsRC = zeros(MAX_CLUSTERS, 2);
-            sizes       = zeros(MAX_CLUSTERS, 1);
+            centroidsRC = zeros(maxClusters, 2);
+            sizes       = zeros(maxClusters, 1);
             numClusters = 0;
             
             stack = zeros(MAX_CELLS, 2);
@@ -334,15 +307,5 @@ classdef slam < matlab.System
                 
                 goalXY = centroidsXY(bestIdx,:);
         end
- 
-        function path = planPathToGoal(map, startXY, goalXY)
-            planner = plannerAStarGrid(map);
-            path = plan(planner, startXY, goalXY, 'world');
-        end
     end
 end
-
- function a = wrapToPiLocal(a)
-            %#codegen
-            a = mod(a + pi, 2*pi) - pi;
- end
